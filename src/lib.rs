@@ -16,6 +16,8 @@ extern crate crypto = "rust-crypto";
 extern crate sqlite = "sqlite3";
 extern crate libbspatch = "bspatch";
 extern crate libbsdiff = "bsdiff";
+extern crate capnp;
+extern crate capnp_rpc = "capnp-rpc";
 
 extern crate collections;
 extern crate serialize;
@@ -34,7 +36,6 @@ pub use tree::{Tree, MutableTree, FlatTree, MutableFlatTree, DeepTree, MutableDe
 pub use blob::{Blob, MutableBlob, FsBlob};
 pub use diff::{Diff, Patch, DiskPatch};
 
-
 // Modules
 pub mod blob;
 pub mod change;
@@ -50,10 +51,10 @@ pub mod tree;
 pub mod macros;
 pub mod repository;
 pub mod database;
-
+pub mod rpc;
 //Things to fix in rust:
 //.as_vec vs .as_bytes
 //Actually submit that grapheme cluster iteration pr
 //Documentation for core::int::BITS uses architecture of rustdoc's server
 //http://doc.rust-lang.org/std/owned/trait.AnyOwnExt.html uses ~
-
+//Fix RWLock -> RwLock according to consistency guidelines

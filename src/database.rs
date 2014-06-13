@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::io::fs;
 use std::io;
 use std::io::{IoResult, BufReader, File, MemWriter};
+use std::io::{BufferedWriter, BufferedReader};
 
 use commit::Basic;
 
@@ -36,6 +37,9 @@ pub trait Database {
 	fn drop_changeseq(&mut self, id: ID) -> bool;
 	fn drop_change(&mut self, id: ID) -> bool;
 	fn drop_patch(&mut self, id: ID) -> bool;
+
+	fn forward_refs(&self, id: ID) -> Option<Vec<ID>>;
+	fn backward_refs(&self, id: ID) -> Option<Vec<ID>>;
 
 	fn commit_history(&mut self, id: ID) -> Option<Vec<ID>> {
 		let mut history: Vec<ID> = vec!();
@@ -162,6 +166,125 @@ impl<T: Disk+Object+Clone> TrivialObjectDb<T> {
 }
 
 
+struct TrivialHistoryDb {
+	forward_path: Path,
+	forward_cache: HashMap<ID, Vec<ID>>,
+	backward_path: Path,
+	backward_cache: HashMap<ID, Vec<ID>>,
+	dirty: bool,
+}
+
+impl TrivialHistoryDb {
+	pub fn new(forward: &Path, backward: &Path) -> TrivialHistoryDb {
+		let mut db = TrivialHistoryDb {
+			forward_path: forward.clone(),
+			forward_cache: HashMap::new(),
+			backward_path: backward.clone(),
+			backward_cache: HashMap::new(),
+			dirty: false,
+		};
+		db.load().unwrap();
+		return db;
+	}
+
+	fn load(&mut self) -> IoResult<()> {
+		try!(self.load_forward());
+		try!(self.load_backward());
+		return Ok(());
+	}
+
+	pub fn flush(&mut self) -> IoResult<()> {
+		try!(self.flush_forward());
+		try!(self.flush_backward());
+		self.dirty = false;
+		return Ok(());
+	}
+
+	fn load_forward(&mut self) -> IoResult<()> {
+		let mut file = try!(io::File::open(&self.forward_path));
+		let object_count = try!(file.read_le_u64());
+		
+		self.forward_cache.reserve(object_count as uint);
+
+		for _ in range(0, object_count) {
+			let key_id: ID = try!(Disk::read(&mut file));
+
+			let ref_count = try!(file.read_le_u64()) as uint;
+			let mut value_ids = Vec::with_capacity(ref_count);
+
+			for _ in range(0, ref_count) {
+				let value_id: ID = try!(Disk::read(&mut file));
+				value_ids.push(value_id);
+			}
+			self.forward_cache.insert(key_id, value_ids);
+		}
+
+		return Ok(());
+	}
+
+	fn load_backward(&mut self) -> IoResult<()> {
+		let mut file = try!(io::File::open(&self.backward_path));
+		let object_count = try!(file.read_le_u64());
+		
+		self.backward_cache.reserve(object_count as uint);
+
+		for _ in range(0, object_count) {
+			let key_id: ID = try!(Disk::read(&mut file));
+
+			let ref_count = try!(file.read_le_u64()) as uint;
+			let mut value_ids = Vec::with_capacity(ref_count);
+
+			for _ in range(0, ref_count) {
+				let value_id: ID = try!(Disk::read(&mut file));
+				value_ids.push(value_id);
+			}
+			self.backward_cache.insert(key_id, value_ids);
+		}
+		
+		return Ok(());
+	}
+
+	pub fn flush_forward(&mut self) -> IoResult<()> {
+		let mut file = try!(io::File::create(&self.forward_path));
+
+		let object_count = self.forward_cache.len();
+		try!(file.write_le_u64(object_count as u64));
+
+		let mut buffered = BufferedWriter::new(file);
+		for (k, v) in self.forward_cache.iter() {
+			let ref_count = v.len() as u64;
+			try!(k.write(&mut buffered));
+			try!(buffered.write_le_u64(ref_count));
+			for id in v.iter() {
+				try!(id.write(&mut buffered));
+			}
+		}
+
+		self.dirty = false;
+		return Ok(());
+	}
+
+	pub fn flush_backward(&mut self) -> IoResult<()> {
+		let mut file = try!(io::File::create(&self.backward_path));
+
+		let object_count = self.backward_cache.len();
+		try!(file.write_le_u64(object_count as u64));
+
+		let mut buffered = BufferedWriter::new(file);
+		for (k, v) in self.backward_cache.iter() {
+			let ref_count = v.len() as u64;
+			try!(k.write(&mut buffered));
+			try!(buffered.write_le_u64(ref_count));
+			for id in v.iter() {
+				try!(id.write(&mut buffered));
+			}
+		}
+
+		self.dirty = false;
+		return Ok(());
+	}
+}
+
 
 pub struct TrivialDb {
 	tag_db: TrivialObjectDb<DiskTag>,
@@ -169,6 +292,7 @@ pub struct TrivialDb {
 	changeseq_db: TrivialObjectDb<DiskChangeSeq>,
 	change_db: TrivialObjectDb<DiskChange>,
 	patch_db: TrivialObjectDb<DiskPatch>,
+	history_db: TrivialHistoryDb,
 }
 
 impl TrivialDb {
@@ -179,11 +303,18 @@ impl TrivialDb {
 			changeseq_db: TrivialObjectDb::new(&met_root.join("changeseq.db")),
 			change_db: TrivialObjectDb::new(&met_root.join("change.db")),
 			patch_db: TrivialObjectDb::new(&met_root.join("patch.db")),
+			history_db: TrivialHistoryDb::new(&met_root.join("forward.db"), &met_root.join("backward.db")),
 		}
 	}
+
+	fn add_refs(&self, parent: ID, child: ID) {
+		unimplemented!();
+	}
+
+	fn remove_refs(&self, commit: ID) {
+		unimplemented!();
+	}
 }
-
-
 
 impl Drop for TrivialDb {
 	fn drop(&mut self) {
@@ -214,5 +345,13 @@ impl Database for TrivialDb {
 	fn drop_changeseq(&mut self, id: ID) -> bool { self.changeseq_db.unset(id) }
 	fn drop_change(&mut self, id: ID) -> bool { self.change_db.unset(id) }
 	fn drop_patch(&mut self, id: ID) -> bool { self.patch_db.unset(id) }
+
+	fn forward_refs(&self, id: ID) -> Option<Vec<ID>> {
+		unimplemented!();
+	}
+
+	fn backward_refs(&self, id: ID) -> Option<Vec<ID>> {
+		unimplemented!();
+	}
 }
 
