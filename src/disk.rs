@@ -1,7 +1,7 @@
 
 use object::Object;
 
-
+use database::Database;
 use std::io::{IoResult, BufReader};
 
 // Met-serializable objects
@@ -23,6 +23,83 @@ pub trait Disk {
 	}
 }
 
+impl Disk for String {
+	fn read<R: Reader>(reader: &mut R) -> IoResult<String> {
+		let byte_count = try!(reader.read_le_u64());
+		let bytes = try!(reader.read_exact(byte_count as uint));
+		// FIXME: Error handling
+		return Ok(String::from_utf8(bytes).unwrap());
+	}
+
+	fn write<W: Writer>(&self, writer: &mut W) -> IoResult<()> {
+		let bytes = self.as_bytes();
+		try!(writer.write_le_u64(bytes.len() as u64));
+		try!(writer.write(bytes));
+		return Ok(());
+	}
+}
+
+impl Disk for Path {
+	fn read<R: Reader>(reader: &mut R) -> IoResult<Path> {
+		let byte_count = try!(reader.read_le_u64());
+		let bytes = try!(reader.read_exact(byte_count as uint));
+		// FIXME: Error handling
+		return Ok(Path::new(bytes));
+	}
+
+	fn write<W: Writer>(&self, writer: &mut W) -> IoResult<()> {
+		let bytes = self.as_vec();
+		try!(writer.write_le_u64(bytes.len() as u64));
+		try!(writer.write(bytes));
+		return Ok(());
+	}
+}
+
+/*
+//Damn, this impl issue / lack of feature is annoying as hell.
+impl Disk for Vec<u8> {
+	fn read<R: Reader>(reader: &mut R) -> IoResult<Vec<u8>> {
+		let entries = try!(reader.read_le_u64());
+		return reader.read_exact(entries as uint);
+	}
+
+	fn write<W: Writer>(&self, writer: &mut W) -> IoResult<()> {
+		let entries: u64 = self.len() as u64;
+		try!(writer.write_le_u64(entries));
+		return writer.write(self.as_slice());
+	}
+}
+*/
+
+impl<D: Disk> Disk for Vec<D> {
+	fn read<R: Reader>(reader: &mut R) -> IoResult<Vec<D>> {
+		let entries = try!(reader.read_le_u64());
+		let mut result = Vec::with_capacity(entries as uint);
+		for i in range(0, entries) {
+			let entry: D = try!(Disk::read(reader));
+			result.push(entry);
+		}
+		return Ok(result);
+	}
+
+	fn write<W: Writer>(&self, writer: &mut W) -> IoResult<()> {
+		let entries: u64 = self.len() as u64;
+		try!(writer.write_le_u64(entries));
+		for v in self.iter() {
+			try!(v.write(writer));
+		}
+		return Ok(());
+	}
+}
+
+/*
+pub type DiskArtifacts = (Vec<DiskTag>,
+	                        Vec<DiskCommit>,
+	                        Vec<DiskChangeSeq>,
+	                        Vec<DiskChange>,
+	                        Vec<DiskPatch>);
+*/
+
 //Maybe do this explicitly for tuples of D: Disk to some length, like how Haskell does long tuples
 pub trait ToDisk<D: Disk, T> {
 	fn to_disk(&self) -> (D, T);
@@ -36,7 +113,7 @@ impl<'a, D: Disk, T, TD: ToDisk<D, T>> ToDisk<D, T> for &'a TD {
 
 impl<D: Disk, T, TD: ToDisk<D, T>> ToDisk<D, T> for Box<TD> {
 	fn to_disk(&self) -> (D, T) {
-		self.to_disk()
+		(**self).to_disk()
 	}
 }
 
@@ -53,9 +130,6 @@ impl<D: Disk> ToDisk<D, ()> for D {
 */
 
 //We might need the tuple thing 
-pub trait FromDisk<D, S> {
-	fn from_disk(disk: &D, stores: &mut S) -> IoResult<Self>;
+pub trait FromDisk<T, D: Database> {
+	fn from_disk(&self, database: &mut D) -> IoResult<T>;
 }
-
-//TODO: Should there be an implicit FromDisk for Disk types, line with ToDisk?
-//impl<D: Disk> FromDisk<D, 

@@ -15,6 +15,8 @@ use serialize::hex::{ToHex, FromHex};
 use disk::Disk;
 use std::io::IoResult;
 
+use object::{Object, Hasher};
+
 #[deriving(Hash)]
 pub struct ID {
 	pub id: [u8, ..32]
@@ -29,6 +31,13 @@ pub static EmptyID: ID = ID{id: [227, 176, 196, 66,  152, 252, 28,  20,
 pub static NullID: ID = ID{id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]};
 
+
+// Some type aliases
+pub type CommitID = ID;
+pub type ChangeSeqID = ID;
+pub type ChangeID = ID;
+pub type PatchID = ID;
+pub type TagID = ID;
 
 impl ID {
 	pub fn from_hex(hex: &str) -> ID {
@@ -46,21 +55,15 @@ impl ID {
 
 //FIXME: Should this return EmptyID or NullID?
 impl Default for ID {
+	#[inline]
 	fn default() -> ID { EmptyID }
 }
 
 impl Disk for ID {
 	fn read<R: Reader>(reader: &mut R) -> IoResult<ID> {
 		let mut id: ID = Default::default();
-		let mut read = 0;
-
-		// Read until a full ID has been read, or error.
-		while read < id.id.len() {
-			match reader.read(id.id.as_mut_slice()) {
-				Ok(n) => read += n,
-				Err(e) => { return Err(e); }
-			}
-		}
+		let mut id_slice = id.id.as_mut_slice();
+		try!(reader.read_at_least(id_slice.len(), id_slice));
 		return Ok(id);
 	}
 
@@ -92,6 +95,7 @@ impl<E, D: Decoder<E>> Decodable<D, E> for ID {
 }*/
 
 impl ToHex for ID {
+	#[inline]
 	fn to_hex(&self) -> String {
 		self.id.as_slice().to_hex()
 	}
@@ -131,4 +135,15 @@ impl Show for ID {
 		self.to_hex().fmt(f)
 		//write!(f, r"{}", )
 	}
+}
+
+
+//FIXME: Silly hack here, since we can't do the impls properly
+impl Object for ID {
+	fn kind(&self) -> &'static str { "id" }
+	fn hash<H: Hasher>(&self, hasher: &mut H) {
+		hasher.input(self.id.as_slice());
+	}
+	fn inner_id(&self) -> ID { self.clone() }
+	fn id(&self) -> ID { self.clone() }
 }

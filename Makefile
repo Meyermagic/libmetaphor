@@ -5,4 +5,4 @@ all: libmetaphor
 
 .PHONY : libmetaphor
 libmetaphor:
-	rustc -O -L deps src/lib.rs
+	rustc -g -L deps src/lib.rs

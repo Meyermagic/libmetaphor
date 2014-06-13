@@ -7,14 +7,38 @@ use diff::common::{common_affix, lcs};
 use diff::{Diff, Patch, DiskPatch};
 use semver::Version;
 use blob::{Blob, MutableBlob};
-use disk::{Disk, ToDisk};
+use disk::{Disk, ToDisk, FromDisk};
+use database::Database;
 use std::io::IoResult;
 
-#[deriving(Show,Decodable,Encodable)]
+use std::io::BufReader;
+
+use std::io::MemWriter;
+
+use std::intrinsics::TypeId;
+use std::any::Any;
+
+#[deriving(Clone,Show,Decodable,Encodable)]
 pub struct PatienceEdit<T> {
 	old_index: uint,
 	deleted: uint,
 	inserted: Vec<T>,
+}
+
+impl<T: Disk> Disk for PatienceEdit<T> {
+	fn read<R: Reader>(reader: &mut R) -> IoResult<PatienceEdit<T>> {
+		let old_index = try!(reader.read_le_u64()) as uint;
+		let deleted = try!(reader.read_le_u64()) as uint;
+		let inserted: Vec<T> = try!(Disk::read(reader));
+		return Ok(PatienceEdit{old_index: old_index, deleted: deleted, inserted: inserted});
+	}
+
+	fn write<W: Writer>(&self, writer: &mut W) -> IoResult<()> {
+		try!(writer.write_le_u64(self.old_index as u64));
+		try!(writer.write_le_u64(self.deleted as u64));
+		try!(self.inserted.write(writer));
+		return Ok(());
+	}
 }
 
 #[deriving(Show)]
@@ -25,11 +49,22 @@ pub struct PatienceDelta {
 	inserted: uint,
 }
 
-#[deriving(Show,Decodable,Encodable)]
+#[deriving(Clone,Show,Decodable,Encodable)]
 pub struct PatiencePatch<T> {
 	edits: Vec<PatienceEdit<T>>,
 }
 
+impl<T: Disk> Disk for PatiencePatch<T> {
+	fn read<R: Reader>(reader: &mut R) -> IoResult<PatiencePatch<T>> {
+		let edits: Vec<PatienceEdit<T>> = try!(Disk::read(reader));
+		return Ok(PatiencePatch{edits: edits});
+	}
+
+	fn write<W: Writer>(&self, writer: &mut W) -> IoResult<()> {
+		try!(self.edits.write(writer));
+		return Ok(());
+	}
+}
 
 pub struct PatienceDiff<'a, E> {
 	old: &'a [E],
@@ -249,17 +284,17 @@ impl<'a, E: Eq+Clone+Hash> PatienceDiff<'a, E> {
 	}
 }
 
-#[deriving(Clone, Eq, PartialEq, Hash)]
+#[deriving(Show,Clone, Eq, PartialEq, Hash)]
 enum LineBlob {
 	OldBlob,
 	NewBlob,
 }
 type LineNumber = uint;
 
-#[deriving(Clone, Eq, PartialEq, Hash)]
+#[deriving(Show,Clone, Eq, PartialEq, Hash)]
 struct LineReference(LineBlob, LineNumber);
 
-#[deriving(Show,Decodable,Encodable)]
+#[deriving(Clone,Show,Decodable,Encodable)]
 pub struct PatienceLinePatch(PatiencePatch<String>);
 pub struct PatienceLineDiff;
 
@@ -279,6 +314,10 @@ impl<'a> Diff<PatienceLinePatch> for PatienceLineDiff {
 		let new_blob_str = String::from_utf8(new_blob_bytes).unwrap();
 		let new_blob_lines: Vec<&str> = new_blob_str.as_slice().split('\n').collect();
 
+		//debug!("strings '{}' and '{}'", old_blob_str, new_blob_str);
+		//debug!("lengths '{}' and '{}'", old_blob_str.len(), new_blob_str.len());
+		//debug!("using lines {} and {}", old_blob_lines, new_blob_lines);
+		//debug!("lengths {} and {}", old_blob_lines.len(), new_blob_lines.len());
 		//FIXME: We could also map to pointers to the first occurence of the line, and run the diff on the pointers
 		//Map the lines to (LineVersion, uint) pairs. (where the uint is the line number in blob)
 		let mut line_map = HashMap::new();
@@ -296,9 +335,11 @@ impl<'a> Diff<PatienceLinePatch> for PatienceLineDiff {
 		//FIXME: If we need to optimize, we certainly don't need to make so many passes over every element (including those in the actual diff)
 
 		//Run the diff on the mapped lines
+		debug!("initializing diff with {} and {}", old_line_nums.as_slice(), new_line_nums.as_slice());
 		let mut differ = PatienceDiff::new(old_line_nums.as_slice(), new_line_nums.as_slice());
 		differ.diff();
 		let lineref_patch = differ.get_patch();
+		debug!("made patch (lineref): {}", lineref_patch);
 		return Ok(PatienceLinePatch(PatiencePatch{
 			edits: lineref_patch.edits.iter().map(|edit| {
 				PatienceEdit {
@@ -317,12 +358,12 @@ impl<'a> Diff<PatienceLinePatch> for PatienceLineDiff {
 }
 
 impl Patch for PatienceLinePatch {
-	fn algorithm(_: Option<PatienceLinePatch>) -> &'static str { "patience_line_patch" }
+	fn algorithm(&self) -> &'static str { "patience_line_patch" }
 	fn patch_blob<T: MutableBlob>(&self, blob: &mut T) -> IoResult<()> {
 		let old_blob_bytes = try!(blob.to_bytes());
 		let old_blob_str = String::from_utf8(old_blob_bytes).unwrap();
 		let old_blob_lines: Vec<&str> = old_blob_str.as_slice().split('\n').collect();
-
+		debug!("old_blob_lines: {}, {}", old_blob_lines, old_blob_lines.len());
 		let mut new_blob_lines: Vec<String> = vec!();
 
 		let mut i = 0;
@@ -331,8 +372,10 @@ impl Patch for PatienceLinePatch {
 
 		// Loop over the edits in the patch
 		for edit in inner_patch.edits.iter() {
+			debug!("The edit: {}, i = {}", edit, i);
 			// Add matched lines to output
 			for j in range(i, edit.old_index) {
+				debug!("nl: {}, ol: {}, i: {}, j: {}", new_blob_lines.len(), old_blob_lines.len(), i, j);
 				new_blob_lines.push(String::from_str(*old_blob_lines.get(j)));
 			}
 
@@ -345,7 +388,12 @@ impl Patch for PatienceLinePatch {
 			// Append the inserted lines
 			new_blob_lines.push_all(edit.inserted.as_slice());
 		}
+		// Add trailing old lines
+		for j in range(i, old_blob_lines.len()) {
+			new_blob_lines.push(String::from_str(*old_blob_lines.get(j)));
+		}
 
+		debug!("new_blob_lines: {}, {}", new_blob_lines, new_blob_lines.len());
 		let new_blob_str = new_blob_lines.connect("\n");
 		return blob.from_bytes(new_blob_str.as_bytes());
 	}
@@ -353,6 +401,24 @@ impl Patch for PatienceLinePatch {
 
 impl ToDisk<DiskPatch, ()> for PatienceLinePatch {
 	fn to_disk(&self) -> (DiskPatch, ()) {
-		unimplemented!();
+		let algorithm = String::from_str("patience_line_patch");
+		let mut body_writer = MemWriter::new();
+		let &PatienceLinePatch(ref inner_patch) = self;
+		//FIXME: Error handling
+		inner_patch.write(&mut body_writer);
+		let body = body_writer.unwrap();
+		return (DiskPatch{algorithm: algorithm, body: body}, ());
+	}
+}
+
+pub struct DiskPatienceLinePatch<'a> {
+	pub patch: &'a DiskPatch
+}
+
+impl<'a, D: Database> FromDisk<Box<PatienceLinePatch>, D> for DiskPatienceLinePatch<'a> {
+	fn from_disk(&self, database: &mut D) -> IoResult<Box<PatienceLinePatch>> {
+		let mut reader = BufReader::new(self.patch.body.as_slice());
+		let p_patch: PatiencePatch<String> = Disk::read(&mut reader).unwrap();
+		return Ok(box PatienceLinePatch(p_patch));
 	}
 }
